@@ -54,6 +54,7 @@ class vdms(object):
 
         self.connected = False
         self.last_response = ''
+        #TODO: make these fields private
         self.cluster_config = cluster_config # Can take on values: 'replicate', 'shard'
         #TODO: CHECK FOR THE IMPOSED RANKING in cluster_info BEING UNIQUE
         cluster_info[1] = sorted(cluster_info[1], key = lambda x: x[1]) # sorting servers by rank
@@ -62,6 +63,7 @@ class vdms(object):
         # configures last_server to the top-ranked server as a default
         self.last_server = 0
 
+    # SELECTOR FUNCTIONS START #
     def distributed_Add(self):
         """
         Helper function for dealing with Addxx queries in a distributed environment
@@ -77,6 +79,44 @@ class vdms(object):
         elif self.cluster_config == "replicate":
             return range(1, self.num_servers+1)
 
+    def distributed_Search(self, searchQuery):
+        """
+        Helper function for deaing with database search queries in a distributed  environment
+        searchQuery: A clean search query in dictionary form
+        returns: List(int) ... of servers in the cluster to run the Searchxx query over
+        """
+        #TODO: Add a hashing method for more efficient searches
+        return range(1, self.num_servers+1)
+
+    def distributed_Update(self, updateQuery):
+        """
+        Helper function for deaing with database search queries in a distributed environment
+        updateQuery: A clean update query in dictionary form
+        returns: List(int) ... of servers in the cluster to run the Updatexxx query over
+        """
+        #TODO: Add a hashing method for more efficiently narrowing down elements
+        return range(1, self.num_servers+1)
+
+    # SELECTOR FUNCTIONS END #
+
+    def execute_set_sync(self, server_set, query):
+        """
+        Helper function for creating multiple threads for facilitating parallel
+        execution of a query over a subset of servers in the cluster
+        server_set: The subset of the cluster to execute the commands over
+        query: The commands to be executed over the selected servers
+        returns: None
+        """
+
+    def parse_query(self, commandName):
+        """
+        Helper function for extracting a particular command out of a large query in dict
+        form
+        commandName: refer https://github.com/IntelLabs/vdms/wiki/API-Description for the list
+        of allowed commands
+        returns: Dict, composed of the specific instance of commandName
+        """
+
     def __del__(self):
         self.conn.close()
 
@@ -87,10 +127,8 @@ class vdms(object):
     #     """
     #
     #     return self.cluster_info[1][[index for (index, a_tuple) in enumerate(self.cluster_info[1]) if a_tuple[1]==rank][0]]
-
-
+    #
     def connect(self, host='localhost', port=55555):
-
         self.conn.connect((host, port))
         self.connected = True
 
@@ -99,7 +137,7 @@ class vdms(object):
         self.connected = False
 
     # Recieves a json struct as a string
-    def query(self, query, blob_array = []):
+    def query(self, query, blob_array = [], distribute=False):
 
         # Check the query type
         if not isinstance(query, str): # assumes json
@@ -136,6 +174,7 @@ class vdms(object):
         self.conn.send(data)
 
         # Recieve response
+        #TODO: replace with recv(self.num_servers)
         recv_len = self.conn.recv(4)
         recv_len = struct.unpack('@I', recv_len)[0]
         response = b''
