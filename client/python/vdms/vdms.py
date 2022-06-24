@@ -40,7 +40,7 @@ from . import queryMessage_pb2
 
 class vdms(object):
 
-    def __init__(self):
+    def __init__(self, cluster_config, cluster_info):
         self.dataNotUsed = []
         self.conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.conn.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
@@ -54,11 +54,43 @@ class vdms(object):
 
         self.connected = False
         self.last_response = ''
+        self.cluster_config = cluster_config # Can take on values: 'replicate', 'shard'
+        #TODO: CHECK FOR THE IMPOSED RANKING in cluster_info BEING UNIQUE
+        cluster_info[1] = sorted(cluster_info[1], key = lambda x: x[1]) # sorting servers by rank
+        self.cluster_info = cluster_info # 3-tuple of (hostname, port, rank)
+        self.num_servers = len(cluster_info[1])
+        # configures last_server to the top-ranked server as a default
+        self.last_server = 0
+
+    def distributed_Add(self):
+        """
+        Helper function for dealing with Addxx queries in a distributed environment
+        returns: List(int) ... of servers in the cluster to re-route Addxxx query to
+        cluster_config == 'shard': Selects the server to re-route Addxxx query to via round-robin
+        cluster_config == 'replicate': Sends Addxxx query to every server in the coluster
+        """
+        if self.cluster_config == "shard":
+            out = (self.last_server+1) % self.num_servers
+            self.last_server += 1
+            return out
+
+        elif self.cluster_config == "replicate":
+            return range(1, self.num_servers+1)
 
     def __del__(self):
         self.conn.close()
 
+    # def get_server(self, rank):
+    #     """
+    #     takes: rank of server to be found
+    #     returns: (hostname, port) for the required server
+    #     """
+    #
+    #     return self.cluster_info[1][[index for (index, a_tuple) in enumerate(self.cluster_info[1]) if a_tuple[1]==rank][0]]
+
+
     def connect(self, host='localhost', port=55555):
+
         self.conn.connect((host, port))
         self.connected = True
 
