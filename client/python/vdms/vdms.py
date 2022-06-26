@@ -99,14 +99,98 @@ class vdms(object):
 
     # SELECTOR FUNCTIONS END #
 
-    def execute_set_sync(self, server_set, query):
+    def execute_set_sync(self, server_set, query, blob_array=[]):
         """
         Helper function for creating multiple threads for facilitating parallel
         execution of a query over a subset of servers in the cluster
         server_set: The subset of the cluster to execute the commands over
-        query: The commands to be executed over the selected servers
-        returns: None
+        command: The command to be executed over the selected servers
+        returns: List[Dict] (JSON-parsable)
         """
+        #TODO: Should a process be used here instead to get the kind of behaviour that I need?
+        # This might end up being really intensive and error-prone though, since it creates
+        # a lot of processes
+        threads = dict()
+        for i, server in enumerate(server_set):
+            # Constructing the threads, and storing them in a dict for easy access
+            threads["t" + str(i)] = Thread(target=self.conn_send_receive,
+                                           args=((self.cluster_info[1][server][0],
+                                                  self.cluster_info[1][server][1]), query, blob_array))
+        def mutate_dict(f,d):
+            for k, v in d.iteritems():
+                d[k] = f(v)
+        out_dict = mutate_dict(lambda x: x.start(), threads)
+
+        return out_dict
+
+    def conn_send_receive(self, conn_prop, query, blob_array=[]):
+        """
+        Target function for the threads to be executed in execute_set_sync
+        Connects to a given server, sends the given query to it and recieves
+        a response
+        conn_prop: (hostname, port)
+        query: List[Dict] (JSON-parsable)
+        """
+        self.connect(conn_prop)
+
+        # Check the query type
+        if not isinstance(query, str): # assumes json
+            query_str = json.dumps(query)
+        else:
+            query_str = query
+
+        if not self.connected:
+            return "NOT CONNECTED"
+
+        quer = queryMessage_pb2.queryMessage()
+        # quer has .json and .blob
+        quer.json = query_str
+
+        # We allow both a "list of lists" or a "list"
+        # to be passed as blobs.
+        # This is because we originally forced a "list of lists",
+        # for no good reason other than lacking Python skills.
+        # But most of the apps pass a "list of list" as a param,
+        # and we don't want to break backward-compatibility.
+        # So we now allow both.
+        for im in blob_array:
+            if isinstance(im, list):
+                # extend will insert the entire list at the end
+                quer.blobs.extend(im)
+            else:
+                # append will just insert a single element at the end
+                quer.blobs.append(im)
+
+        # Serialize with protobuf and send
+        data = quer.SerializeToString();
+        sent_len = struct.pack('@I', len(data)) # send size first
+        self.conn.send( sent_len )
+        self.conn.send(data)
+
+        # Recieve response
+        #TODO: replace with recv(self.num_servers)
+        recv_len = self.conn.recv(4)
+        recv_len = struct.unpack('@I', recv_len)[0]
+        response = b''
+        while len(response) < recv_len:
+            packet = self.conn.recv(recv_len - len(response))
+            if not packet:
+                return None
+            response += packet
+
+        querRes = queryMessage_pb2.queryMessage()
+        querRes.ParseFromString(response)
+
+        response_blob_array = []
+        for b in querRes.blobs:
+            response_blob_array.append(b)
+
+        self.last_response = json.loads(querRes.json)
+
+        self.disconnect()
+
+        return (self.last_response, response_blob_array)
+
 
     def parse_query(self, query, commandName):
         """
@@ -151,6 +235,7 @@ class vdms(object):
 
     # Recieves a json struct as a string
     def query(self, query, blob_array = [], distribute=False):
+        #TODO: re-format query to just be a thin wrapper around execute_set_sync
 
         # Check the query type
         if not isinstance(query, str): # assumes json
