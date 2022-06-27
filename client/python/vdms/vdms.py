@@ -28,6 +28,8 @@
 #! /usr/bin/python
 import struct
 from threading import Thread
+import itertools
+from concurrent.futures import ThreadPoolExecutor
 import sys
 import os
 import socket
@@ -103,25 +105,33 @@ class vdms(object):
         """
         Helper function for creating multiple threads for facilitating parallel
         execution of a query over a subset of servers in the cluster
-        server_set: The subset of the cluster to execute the commands over
+        server_set: List[Int] The subset of the cluster to execute the commands over
         command: The command to be executed over the selected servers
         returns: List[Dict] (JSON-parsable)
         """
         #TODO: Should a process be used here instead to get the kind of behaviour that I need?
         # This might end up being really intensive and error-prone though, since it creates
         # a lot of processes
+        pool = ThreadPoolExecutor(len(server_set))
         threads = dict()
-        for i, server in enumerate(server_set):
-            # Constructing the threads, and storing them in a dict for easy access
-            threads["t" + str(i)] = Thread(target=self.conn_send_receive,
-                                           args=((self.cluster_info[1][server][0],
-                                                  self.cluster_info[1][server][1]), query, blob_array))
-        def mutate_dict(f,d):
-            for k, v in d.iteritems():
-                d[k] = f(v)
-        out_dict = mutate_dict(lambda x: x.start(), threads)
+        # https://stackoverflow.com/a/58829816
+        with ThreadPoolExecutor() as executor: # context manager for the threads created inside
+            for i, server in enumerate(server_set):
+                # Executing the threads
+                arr = [(self.cluster_info[1][server][0], self.cluster_info[1][server][1]), query, blob_array]
+                # https://github.com/Joldnine/joldnine.github.io/issues/10
+                threads["t" + str(i)] = executor.submit(lambda p: self.conn_send_receive(*p), arr)
+        # for i, server in enumerate(server_set):
+        #     # Constructing the threads, and storing them in a dict for easy access
+        #     threads["t" + str(i)] = Thread(target=self.conn_send_receive,
+        #                                    args=((self.cluster_info[1][server][0],
+        #                                           self.cluster_info[1][server][1]), query, blob_array))
+        # def mutate_dict(f,d):
+        #     for k, v in d.iteritems():
+        #         d[k] = f(v)
+        # out_dict = mutate_dict(lambda x: x.start(), threads)
 
-        return out_dict
+        return threads
 
     def conn_send_receive(self, conn_prop, query, blob_array=[]):
         """
@@ -192,7 +202,8 @@ class vdms(object):
         return (self.last_response, response_blob_array)
 
 
-    def parse_query(self, query, commandName):
+    @staticmethod
+    def parse_query(query, commandName):
         """
         Helper function for extracting instances of  particular command out of a large query in
         dict form
@@ -202,6 +213,7 @@ class vdms(object):
         returns: Tuple[Int, List[Dict]], 1/0 for informing if found/not found and the Dict composed of
         the specific instance of commandName in the query
         """
+        #TODO: Add distinguishing parse for SimilaritySearch queries
         out = []
         exists = 0
         for command in query:
@@ -236,62 +248,24 @@ class vdms(object):
     # Recieves a json struct as a string
     def query(self, query, blob_array = [], distribute=False):
         #TODO: re-format query to just be a thin wrapper around execute_set_sync
+        AddCommands = self.parse_query(query, "Addxxx")
+        UpdateCommands = self.parse_query(query, "Updatexxx")
+        SearchCommands = self.parse_query(query, "Searchxxx")
 
-        # Check the query type
-        if not isinstance(query, str): # assumes json
-            query_str = json.dumps(query)
-        else:
-            query_str = query
+        #TODO: Since we will always perform Add queries on a single machine, get rid of
+        # all the unecessary list processing
+        AddList = [self.execute_set_sync(self.distributed_Add, AddCommand, blob_array)
+                   for AddCommand in AddCommands] # List[List[Dict]]
+        AddList = list(itertools.chain.from_iterable(AddList)) # Simply adding together all add query outputs
 
-        if not self.connected:
-            return "NOT CONNECTED"
+        UpdateList = [self.execute_set_sync(self.distributed_Update, UpdateCommand, blob_array) for UpdateCommand in UpdateCommands]
+        UpdateList = list(itertools.chain.from_iterable(UpdateList)) # Simply adding together all update query outs
 
-        quer = queryMessage_pb2.queryMessage()
-        # quer has .json and .blob
-        quer.json = query_str
+        SearchList = [self.execute_set_sync(self.distributed_Search, SearchCommand, blob_array) for SearchCommand in SearchCommands]
+        SearchList = list(itertools.chain.from_iterable(SearchList)) #TODO: Change way SimilaritySearch commands are combined
 
-        # We allow both a "list of lists" or a "list"
-        # to be passed as blobs.
-        # This is because we originally forced a "list of lists",
-        # for no good reason other than lacking Python skills.
-        # But most of the apps pass a "list of list" as a param,
-        # and we don't want to break backward-compatibility.
-        # So we now allow both.
-        for im in blob_array:
-            if isinstance(im, list):
-                # extend will insert the entire list at the end
-                quer.blobs.extend(im)
-            else:
-                # append will just insert a single element at the end
-                quer.blobs.append(im)
-
-        # Serialize with protobuf and send
-        data = quer.SerializeToString();
-        sent_len = struct.pack('@I', len(data)) # send size first
-        self.conn.send( sent_len )
-        self.conn.send(data)
-
-        # Recieve response
-        #TODO: replace with recv(self.num_servers)
-        recv_len = self.conn.recv(4)
-        recv_len = struct.unpack('@I', recv_len)[0]
-        response = b''
-        while len(response) < recv_len:
-            packet = self.conn.recv(recv_len - len(response))
-            if not packet:
-                return None
-            response += packet
-
-        querRes = queryMessage_pb2.queryMessage()
-        querRes.ParseFromString(response)
-
-        response_blob_array = []
-        for b in querRes.blobs:
-            response_blob_array.append(b)
-
-        self.last_response = json.loads(querRes.json)
-
-        return (self.last_response, response_blob_array)
+        #TODO: Process each of the above three lists to produce a unified response
+        return AddList + UpdateList + SearchList
 
     def get_last_response(self):
         return self.last_response
